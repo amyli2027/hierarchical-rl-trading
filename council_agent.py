@@ -98,9 +98,16 @@ def train_specialist(role, df, timesteps=15000):
     e_train = StockTradingEnv(df=df, **env_kwargs)
     env_train, _ = e_train.get_sb_env()
     
-    if role == "SURFER": params = {"ent_coef": 0.005, "learning_rate": 0.0002, "n_steps": 2048}
-    elif role == "SNIPER": params = {"ent_coef": 0.05, "learning_rate": 0.0005, "n_steps": 1024}
-    else: params = {"ent_coef": 0.01, "learning_rate": 0.00025, "n_steps": 2048}
+    # Updated Names Logic
+    if role == "Trend_Agent": 
+        # Formerly SURFER
+        params = {"ent_coef": 0.005, "learning_rate": 0.0002, "n_steps": 2048}
+    elif role == "Momentum_Agent": 
+        # Formerly SNIPER
+        params = {"ent_coef": 0.05, "learning_rate": 0.0005, "n_steps": 1024}
+    else: 
+        # Formerly SENTINEL (Conservative/Risk Agent)
+        params = {"ent_coef": 0.01, "learning_rate": 0.00025, "n_steps": 2048}
     
     model = PPO("MlpPolicy", env_train, verbose=0, **params)
     model.learn(total_timesteps=timesteps)
@@ -119,9 +126,12 @@ class SoftVotingManagerEnv(gym.Env):
         return self.stock_env.reset(seed=seed, options=options)
         
     def step(self, action):
+        # Softmax normalization
         weights = np.exp(action - np.max(action)) / np.sum(np.exp(action - np.max(action)))
         
         idx = min(self.stock_env.day * self.stock_env.stock_dim, len(self.stock_env.df)-1)
+        
+        # If Bull Market, suppress the 3rd agent (Conservative_Agent)
         if self.stock_env.df.iloc[idx]['bull_market'] > 0.5:
             weights[2] *= 0.2 
             weights /= np.sum(weights)
@@ -129,7 +139,10 @@ class SoftVotingManagerEnv(gym.Env):
         obs = self.stock_env.state
         obs_r = np.array(obs).reshape(1, -1)
         
+        # Collect predictions from all agents
+        # Note: The order depends on insertion order in 'run_15_year_backtest'
         acts = [agent.predict(obs_r, deterministic=True)[0] for agent in self.agents.values()]
+        
         final_action = (acts[0]*weights[0]) + (acts[1]*weights[1]) + (acts[2]*weights[2])
         
         return self.stock_env.step(final_action[0])
@@ -164,7 +177,7 @@ def run_15_year_backtest():
         d_manager = df_proc[pd.to_datetime(df_proc['date']).dt.year == manager_year]
         d_test = df_proc[pd.to_datetime(df_proc['date']).dt.year == test_year]
 
-        # --- FIX: Check for incomplete years (like 2026) ---
+        # Safety Check for incomplete years (e.g., 2026)
         if len(d_test) < 10:
             print(f"\n[Info] Stopping backtest at {test_year}: Insufficient data (Current Incomplete Year).")
             break
@@ -174,11 +187,19 @@ def run_15_year_backtest():
         for d in [d_agents, d_manager, d_test]:
             d.index = d.date.factorize()[0]
             
+        # Initialize Agents with New Names
+        # IMPORTANT: Order matters for the Voting Manager logic!
         agents = {}
         print("  Training Specialists...")
-        agents["SURFER"], env_conf = train_specialist("SURFER", d_agents)
-        agents["SNIPER"], _ = train_specialist("SNIPER", d_agents)
-        agents["SENTINEL"], _ = train_specialist("SENTINEL", d_agents)
+        
+        # 1. Trend_Agent (formerly SURFER)
+        agents["Trend_Agent"], env_conf = train_specialist("Trend_Agent", d_agents)
+        
+        # 2. Momentum_Agent (formerly SNIPER)
+        agents["Momentum_Agent"], _ = train_specialist("Momentum_Agent", d_agents)
+        
+        # 3. Conservative_Agent (formerly SENTINEL) - This one gets suppressed in Bull markets
+        agents["Conservative_Agent"], _ = train_specialist("Conservative_Agent", d_agents)
         
         print("  Training Manager...")
         mgr_env = SoftVotingManagerEnv(d_manager, agents, env_conf)
